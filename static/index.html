@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>創業顧問 Chat（RAG + SSE）</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Noto Sans TC", Arial; margin: 0; background:#0b1220; color:#e8eefc; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 18px 120px; }
+    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 18px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .sub { opacity: 0.85; margin-bottom: 16px; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    button { background:#5b8cff; border:0; color:#fff; padding:10px 14px; border-radius:12px; cursor:pointer; font-weight: 600; }
+    button:hover { filter: brightness(1.05); }
+    input[type="file"]{ background: rgba(255,255,255,0.08); padding: 10px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); color:#e8eefc; }
+    .log { margin-top: 14px; font-size: 14px; opacity: 0.9; white-space: pre-wrap; }
+    .hint { margin-top: 10px; font-size: 13px; opacity: 0.75; line-height: 1.6; }
+    .footer { position: fixed; left:0; right:0; bottom:0; padding: 12px 16px; background: rgba(11,18,32,0.88); border-top: 1px solid rgba(255,255,255,0.08); backdrop-filter: blur(10px); }
+    .footer .wrap { padding: 0; }
+    .pill { display:inline-block; padding:6px 10px; border-radius: 999px; background: rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.10); font-size: 12px; opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>創業顧問 Chat</h1>
+      <div class="sub">上傳文件 ➜ 自動更新知識 ➜ AI 可以回答更新過的內容</div>
+
+      <div class="row">
+        <button id="openPopup">開啟彈窗機器人</button>
+        <span class="pill">/popup</span>
+        <span class="pill">/api/upload</span>
+        <span class="pill">/api/stream</span>
+      </div>
+
+      <div style="height:14px"></div>
+
+      <div class="row">
+        <input id="file" type="file" />
+        <button id="uploadBtn">上傳並匯入（TXT/MD）</button>
+      </div>
+
+      <div class="hint">
+        ✅ 建議：先上傳你要給 RAG 的文件（txt / md）<br/>
+        ✅ 再打開彈窗問問題，AI 即可回答最新相關內容的知識
+      </div>
+
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div class="wrap">
+      <span class="pill">本機：uvicorn app.main:app --reload</span>
+    </div>
+  </div>
+
+  <script>
+    const log = (t) => document.getElementById("log").textContent = t;
+
+    document.getElementById("openPopup").onclick = () => {
+      window.open("/popup", "startup_chat_popup", "width=420,height=720");
+    };
+
+    document.getElementById("uploadBtn").onclick = async () => {
+      const f = document.getElementById("file").files[0];
+      if (!f) return log("請先選檔案");
+
+      const fd = new FormData();
+      fd.append("file", f);
+
+      log("上傳中...");
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) return log("上傳失敗：\n" + JSON.stringify(data, null, 2));
+      log("上傳完成 ✅\n" + JSON.stringify(data, null, 2));
+    };
+  </script>
+</body>
+</html>

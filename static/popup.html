@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <title>創業顧問（彈窗）</title>
+
+  <style>
+    :root{
+      --bg:#0b1220;
+      --panel: rgba(255,255,255,0.06);
+      --border: rgba(255,255,255,0.10);
+      --text:#e8eefc;
+      --muted: rgba(232,238,252,0.72);
+      --brand:#5b8cff;
+      --brand2:#7c5cff;
+      --shadow: 0 20px 60px rgba(0,0,0,0.45);
+    }
+    *{ box-sizing: border-box; }
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, "Noto Sans TC", Arial;
+      background: radial-gradient(1200px 600px at 20% 0%, rgba(91,140,255,0.22), transparent 55%),
+                  radial-gradient(1200px 600px at 80% 0%, rgba(124,92,255,0.18), transparent 55%),
+                  var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: 14px;
+    }
+    .shell{
+      width: 100%;
+      max-width: 420px;
+      height: 720px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display:flex;
+      flex-direction: column;
+    }
+    .topbar{
+      padding: 12px 14px;
+      display:flex;
+      gap: 10px;
+      align-items:center;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,0.20);
+      backdrop-filter: blur(10px);
+    }
+    .dot{
+      width: 10px; height: 10px; border-radius: 99px;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(91,140,255,0.18);
+    }
+    .title{ font-weight: 800; }
+    .subtitle{
+      margin-left:auto;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .chat{
+      padding: 14px;
+      overflow:auto;
+      flex: 1;
+      display:flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg{
+      max-width: 92%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel);
+      line-height: 1.55;
+      word-break: break-word;
+    }
+    .me{
+      align-self: flex-end;
+      background: rgba(91,140,255,0.16);
+      border-color: rgba(91,140,255,0.25);
+    }
+    .ai{
+      align-self: flex-start;
+      background: rgba(255,255,255,0.06);
+    }
+    .typing{
+      color: var(--muted);
+      font-size: 12px;
+      padding: 0 14px 6px;
+      display:none;
+    }
+    .composer{
+      padding: 12px;
+      border-top: 1px solid var(--border);
+      background: rgba(0,0,0,0.18);
+      display:flex;
+      gap: 10px;
+    }
+    .input{
+      flex:1;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      color: var(--text);
+      outline: none;
+    }
+    .btn{
+      background: linear-gradient(135deg, var(--brand), var(--brand2));
+      border: 0;
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    /* 🔥 關鍵：把 Markdown 變成「聊天格式」 */
+    .chat-message p { margin: 4px 0; }
+    .chat-message ul,
+    .chat-message ol {
+      margin: 4px 0;
+      padding-left: 18px;
+    }
+    .chat-message li { margin: 2px 0; }
+  </style>
+</head>
+
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="dot"></div>
+      <div class="title">創業顧問</div>
+      <div class="subtitle">POC版</div>
+    </div>
+
+    <div id="chat" class="chat"></div>
+    <div id="typing" class="typing">助理輸出中…</div>
+
+    <div class="composer">
+      <input id="q" class="input" placeholder="例如：請問創業第一步該做什麼？" />
+      <button id="send" class="btn">送出</button>
+    </div>
+  </div>
+
+<script>
+const chatEl = document.getElementById("chat");
+const typingEl = document.getElementById("typing");
+const qEl = document.getElementById("q");
+const sendBtn = document.getElementById("send");
+
+function addUser(text){
+  const d = document.createElement("div");
+  d.className = "msg me";
+  d.textContent = text;
+  chatEl.appendChild(d);
+}
+
+function addAI(){
+  const d = document.createElement("div");
+  d.className = "msg ai chat-message";
+  d.innerHTML = "";
+  chatEl.appendChild(d);
+  return d;
+}
+
+async function send(){
+  const q = qEl.value.trim();
+  if(!q) return;
+
+  addUser(q);
+  qEl.value="";
+  sendBtn.disabled=true;
+  typingEl.style.display="block";
+
+  const ai = addAI();
+  let buf="";
+
+  const es = new EventSource("/api/stream?q="+encodeURIComponent(q));
+  es.onmessage = e=>{
+    buf += e.data.replaceAll("\\n", "\n");
+    ai.innerHTML = marked.parse(buf);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  };
+  es.addEventListener("status", e=>{
+    if(e.data==="done"){
+      typingEl.style.display="none";
+      sendBtn.disabled=false;
+      es.close();
+    }
+  });
+  es.onerror = ()=>{
+    ai.textContent="發生錯誤，請確認後端或 API Key。";
+    typingEl.style.display="none";
+    sendBtn.disabled=false;
+    es.close();
+  };
+}
+
+sendBtn.onclick = send;
+qEl.onkeydown = e=>{ if(e.key==="Enter") send(); };
+
+addAI().innerHTML = "你好，我是你的創業顧問。你可以直接描述你的創業想法或問題。";
+</script>
+</body>
+</html>
