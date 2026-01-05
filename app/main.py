@@ -1,19 +1,25 @@
 import os
 import json
+import logging
 from typing import Optional
-from dotenv import load_dotenv
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from openai import OpenAI
+from google.cloud import storage
 
 from app.ingest import ingest_payload
 from app.rag import search
 from app.prompt import SYSTEM_PROMPT
 
+# ============ basic setup ============
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("DED_GCPGCS_RAG")
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI(title="DED_GCPGCS_RAG")
@@ -26,20 +32,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
-STATIC_DIR = os.path.abspath(STATIC_DIR)
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
 
+# GCS client (Cloud Run 上會用預設 Service Account)
+_gcs_client: Optional[storage.Client] = None
+_processed_event_ids = set()
+
+
+def get_gcs_client() -> storage.Client:
+    global _gcs_client
+    if _gcs_client is None:
+        _gcs_client = storage.Client()
+    return _gcs_client
+
+
+def decode_text(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp950", errors="ignore")
+
+
+# ============ routes ============
 @app.get("/", response_class=HTMLResponse)
 def home():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
 
 @app.get("/popup", response_class=HTMLResponse)
 def popup():
     return FileResponse(os.path.join(STATIC_DIR, "popup.html"))
 
+
 @app.get("/health")
 def health():
     return {"ok": True}
+
 
 @app.post("/api/ingest")
 async def api_ingest(payload: dict):
@@ -58,20 +86,72 @@ async def api_ingest(payload: dict):
     )
     return {"ingested": True, "meta": meta}
 
+
 @app.post("/api/upload")
 async def api_upload(file: UploadFile = File(...)):
     """
     上傳 TXT / MD / 任何純文字檔，讀進來後 ingest
     """
     raw = await file.read()
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        # 有些 Windows txt 是 cp950/big5，這裡做一次 fallback
-        text = raw.decode("cp950", errors="ignore")
+    text = decode_text(raw)
 
     meta = ingest_payload(text=text, source="upload", filename=file.filename)
     return {"uploaded": True, "meta": meta, "chars": len(text)}
+
+
+# ✅ Eventarc → Cloud Run 會打這支
+@app.post("/api/eventarc/gcs")
+async def eventarc_gcs(request: Request):
+    """
+    Eventarc (GCS object finalized) 觸發後，會 POST CloudEvent 到 Cloud Run。
+    我們在這裡：
+    1) 解析 bucket + object name
+    2) 去 GCS 下載檔案內容
+    3) ingest_payload() 進 RAG (in-memory)
+    """
+    ce_id = request.headers.get("ce-id") or request.headers.get("Ce-Id")
+    ce_type = request.headers.get("ce-type") or request.headers.get("Ce-Type")
+    body = await request.json()
+
+    # 簡單去重（同一個 event 不重複吃）
+    if ce_id and ce_id in _processed_event_ids:
+        return {"ok": True, "skipped": True, "reason": "duplicate", "ce_id": ce_id}
+    if ce_id:
+        _processed_event_ids.add(ce_id)
+
+    # Eventarc 的 payload 有時候是直接包含 name/bucket，有時候在 data 裡
+    data = body.get("data") if isinstance(body, dict) else None
+    if isinstance(data, dict):
+        bucket = data.get("bucket")
+        name = data.get("name")
+    else:
+        bucket = body.get("bucket") if isinstance(body, dict) else None
+        name = body.get("name") if isinstance(body, dict) else None
+
+    if not bucket or not name:
+        logger.warning("Eventarc payload missing bucket/name. headers=%s body=%s", dict(request.headers), body)
+        raise HTTPException(status_code=400, detail="bucket/name not found in event payload")
+
+    # 只吃你要的格式（先 txt / md）
+    lower = name.lower()
+    if not (lower.endswith(".txt") or lower.endswith(".md")):
+        logger.info("Skip non-text object: gs://%s/%s", bucket, name)
+        return {"ok": True, "skipped": True, "reason": "not_txt_or_md", "bucket": bucket, "name": name}
+
+    logger.info("Eventarc received: ce_id=%s ce_type=%s gs://%s/%s", ce_id, ce_type, bucket, name)
+
+    # 下載檔案
+    gcs = get_gcs_client()
+    bkt = gcs.bucket(bucket)
+    blob = bkt.blob(name)
+    raw = blob.download_as_bytes()
+    text = decode_text(raw)
+
+    meta = ingest_payload(text=text, source="gcs", filename=name)
+    logger.info("Ingested from GCS: gs://%s/%s chars=%s", bucket, name, len(text))
+
+    return {"ok": True, "bucket": bucket, "name": name, "meta": meta, "chars": len(text)}
+
 
 def build_rag_text(user_query: str) -> str:
     docs = search(user_query, top_k=4)
@@ -87,6 +167,7 @@ def build_rag_text(user_query: str) -> str:
         lines.append("")
     return "\n".join(lines).strip()
 
+
 @app.get("/api/stream")
 def stream_answer(q: str = Query(..., description="user query")):
     """
@@ -98,7 +179,6 @@ def stream_answer(q: str = Query(..., description="user query")):
     rag_text = build_rag_text(q)
 
     def event_gen():
-        # 先送一個「開始」訊號（前端可以用來顯示狀態）
         yield "event: status\ndata: start\n\n"
 
         messages = [
@@ -118,7 +198,6 @@ def stream_answer(q: str = Query(..., description="user query")):
             for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
-                    # SSE data 不能直接換行，簡單處理：把 \n 變成 \\n，前端再轉回來
                     safe = delta.content.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
 

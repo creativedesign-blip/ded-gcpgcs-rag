@@ -4,3 +4,4 @@ openai
 python-multipart
 python-dotenv
 numpy
+google-cloud-storage

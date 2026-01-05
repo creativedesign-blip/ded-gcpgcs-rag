@@ -1,49 +1,42 @@
-import os
-import math
-from dotenv import load_dotenv
+from typing import List, Dict
 from openai import OpenAI
-
-# 確保 .env 會被載入（本機跑 uvicorn 最常卡這裡）
-load_dotenv()
+import os
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ====== 簡單的 in-memory vector store（POC） ======
-VECTOR_STORE = []  # 每筆：{text, meta, embedding}
+VECTOR_DB: list[dict] = []
 
-def _require_key():
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY not set. Please set it in .env or environment variables.")
-
-def embed(text: str):
-    _require_key()
-    resp = client.embeddings.create(
+def embed(text: str) -> list[float]:
+    res = client.embeddings.create(
         model="text-embedding-3-small",
-        input=text
+        input=text,
     )
-    return resp.data[0].embedding
+    return res.data[0].embedding
 
-def cosine(a, b):
+def upsert_text(text: str, meta: Dict):
+    VECTOR_DB.append({
+        "embedding": embed(text),
+        "text": text,
+        "meta": meta,
+    })
+
+def cosine(a: list[float], b: list[float]) -> float:
+    import math
     dot = sum(x*y for x, y in zip(a, b))
     na = math.sqrt(sum(x*x for x in a))
     nb = math.sqrt(sum(y*y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
     return dot / (na * nb)
 
-def add_document(text: str, meta: dict):
-    if not text or not text.strip():
-        return
-    VECTOR_STORE.append({
-        "text": text.strip(),
-        "meta": meta or {},
-        "embedding": embed(text.strip())
-    })
-
-def search(query: str, top_k=4):
-    if not VECTOR_STORE:
+def search(query: str, top_k: int = 4) -> List[Dict]:
+    if not VECTOR_DB:
         return []
+
     q_emb = embed(query)
-    scored = [(cosine(q_emb, d["embedding"]), d) for d in VECTOR_STORE]
+
+    scored = []
+    for d in VECTOR_DB:
+        score = cosine(q_emb, d["embedding"])
+        scored.append((score, d))
+
     scored.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in scored[:top_k]]
